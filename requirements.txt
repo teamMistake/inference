@@ -1,0 +1,4 @@
+fastapi-restful==0.4.3
+fastapi
+transformers==4.21.2
+torch==2.0.1

@@ -1,1 +1,1 @@
-from .jamo import Jamo as JamoRouter
+from .jamo import router as JamoRouter

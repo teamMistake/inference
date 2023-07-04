@@ -2,40 +2,41 @@ import typing as T
 from functools import lru_cache
 
 import torch
-from service_streamer import ManagedModel, Streamer
 from fastapi.logger import logger
 from ..settings import get_settings
 from ..jamo import JAMO
 
 env = get_settings()
 
+class JamoModelManager():
+    def __init__(self): self.init_model()
 
-class JamoModelManager(ManagedModel):
     def init_model(self):
-        self.jamo = JAMO.from_pretrained(env.JAMO_MODEL_SIZE, env.JAMO_MODEL_PATH, env.DEVICE)
+        self.model = JAMO.from_pretrained(env.JAMO_MODEL_SIZE, env.JAMO_MODEL_PATH, env.DEVICE)
+        self.model.eval()
 
     @torch.inference_mode()
-    def predict(self, inputs: T.List[torch.Tensor]) -> T.List[torch.Tensor]:
-        logger.info(f"batch size: {len(inputs)}")
-        results = []
+    def predict(self, input: torch.Tensor, max_seq_length: int, input_pos: torch.Tensor, temperature: float, top_k: int) -> torch.Tensor:
+        next_token_idx = 0
         try:
-            batch = torch.cat(inputs, 0).to(env.DEVICE)
-            print("batch_size:", batch.shape)
-            pred = self.classifier(batch)
-            prob = torch.softmax(pred, dim=1)
-            prob = prob.cpu().numpy()
-            results = [output for output in prob]
+            logits = self.model(input, max_seq_length, input_pos)
+            logits = logits[0, -1] / temperature
+
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits = torch.where(logits < v[[-1]], -float("Inf"), logits)
+
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            next_token_idx = torch.multinomial(probs, num_samples=1)
         except Exception as e:
             logger.error(f"Error {self.__class__.__name__}: {e}")
-        return results
+        return next_token_idx
 
+    def clean_cache(self):
+        self.model.reset_cache()
 
 @lru_cache(maxsize=1)
-def get_jamo_streamer():
-    streamer = Streamer(
-        JamoModelManager,
-        batch_size=env.MB_BATCH_SIZE,
-        max_latency=env.MB_MAX_LATENCY,
-        worker_num=env.MB_WORKER_NUM,
-    )
-    return streamer
+def get_jamo_manager():
+    manager = JamoModelManager()
+
+    return manager

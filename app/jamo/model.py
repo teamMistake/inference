@@ -13,7 +13,7 @@ class JamoConfig:
     n_layer: int
     vocab_size: int=20000
     block_size:int=256
-    dropout: int = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
+    dropout: int = 0.0 
 
     @classmethod
     def from_name(cls, name: str) -> Self:
@@ -47,10 +47,27 @@ class JAMO(nn.Module):
         self.mask_cache = None
         self.kv_caches = []
 
+        if pretrain:
+            self.apply(self._init_weights)
+
+            for pn, p in self.named_parameters():
+                if pn.endswith('c_proj.weight'):
+                    torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+            print(f"Number of parameters: {human_format(self.get_num_params())}")
+
     def get_num_params(self):
         n_params = [p.nelement() for p in self.parameters()]
         num = sum(n_params)
         return num
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx,  max_seq_length=None, input_pos=None):
         B, T = idx.shape
@@ -76,8 +93,6 @@ class JAMO(nn.Module):
             mask = self.mask_cache[:, :, :T, :T]
 
         x = self.transformer.drop(self.transformer.wte(idx))
-        # pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)
-        # pos_emb = self.wpe(pos)
 
         if input_pos is None:  # proxy for use_cache=False
             for block in self.transformer.h:
@@ -102,8 +117,8 @@ class JAMO(nn.Module):
     @classmethod
     def from_name(cls, name: str, pretrain:bool=False) -> Self:
         config = JamoConfig.from_name(name)
-        config.dropout = 0.0 if pretrain else 0.1
-        return cls(config, pretrain)
+        config.dropout = 0.0 if pretrain else 0.5
+        return cls(config, pretrain=pretrain)
     
     @classmethod
     def from_pretrained(cls, name: str, path: str, device:torch.device=torch.device("cuda")) -> Self:
@@ -238,10 +253,12 @@ class CasualAttention(nn.Module):
             v = cache_v.index_copy(2, input_pos, v)
             kv_cache = k, v
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))  # (B, N_HEADS, T, T)
-        att = att.masked_fill(mask, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        y = att @ v  # (B, nh, T, hs)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
+        # else:
+        #     att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))  # (B, N_HEADS, T, T)
+        #     att = att.masked_fill(mask, float('-inf'))
+        #     att = F.softmax(att, dim=-1)
+        #     y = att @ v  # (B, nh, T, hs)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # (B, T, C)
         y = self.resid_drop(self.c_proj(y))

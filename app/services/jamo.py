@@ -4,9 +4,8 @@ from fastapi import Depends
 from fastapi.logger import logger
 from ..settings import get_settings
 from ..managers import (
-    get_jamo_streamer
+    get_jamo_manager
 )
-from ..schema import ChatResponseProtocol
 
 env = get_settings()
 
@@ -14,50 +13,83 @@ env = get_settings()
 class JamoService:
     def __init__(
         self,
-        jamo_streamer=Depends(get_jamo_streamer),
+        jamo_manager=Depends(get_jamo_manager),
     ):
         logger.info(f"DI: {self.__class__.__name__}")
-        self.model = jamo_streamer
+        self.model = jamo_manager
+        self.block_size = env.BLOCK_SIZE
 
+    # Generate the idx by idx.
     @torch.inference_mode()
-    def generate(
+    def generate_idx(
         self,
         idx: torch.Tensor,
-        temperature: float=1.0,
-        top_k=None,
-        eos_id=None
+        max_token: int,
+        temperature: float=0.8, 
+        top_k: int=15,
+        eos_id=2
     ) -> T.List[list]:
         T = idx.size(0)
-        max_seq_length = self.model.config.block_size
+        T_new = T + max_token
+        max_seq_length = min(T_new, self.block_size)
 
         device, dtype = idx.device, idx.dtype
+        empty = torch.empty(T_new, dtype=dtype, device=device)
+        empty[:T] = idx
+        idx = empty
+        input_pos = torch.arange(0, T, device=device)
 
         # generate max_new_tokens tokens
-        for _ in range(max_new_tokens):
+        for _ in range(max_token):
             # forward
-            logits = self.model(x)
-            logits = logits[0, -1] / temperature
+            x = idx.index_select(0, input_pos).view(1, -1)
 
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits = torch.where(logits < v[[-1]], -float("Inf"), logits)
-
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1).to(dtype=dtype)
+            idx_next = self.model.predict(input=x, max_seq_length=max_seq_length, input_pos=input_pos, temperature=temperature, top_k=top_k)
             
-            # advance
+            if idx_next == eos_id:
+                break
+            
             input_pos = input_pos[-1:] + 1
-            # concatenate the new generation
             idx = idx.index_copy(0, input_pos, idx_next)
-            return idx[:input_pos] 
 
-        embedding = self.embedding_streamer.predict([image])[0]
-        embedding = torch.unsqueeze(embedding, dim=0)
-        prob = self.classifier_streamer.predict([embedding])[0]
-        top_prob, top_catid = torch.topk(prob, k)
-        top_prob = [prob.item() for prob in top_prob]
-        results = [
-            ChatResponseProtocol(name=self.classes[index], prob=prob)
-            for prob, index in zip(top_prob, top_catid)
-        ]
-        return results
+        self.model.clean_cache()
+        return idx[:input_pos]
+    
+       # Generate the idx by idx.
+    @torch.inference_mode()
+    def streaming_generate_idx(
+        self,
+        idx: torch.Tensor,
+        max_token: int,
+        temperature: float=0.8, 
+        top_k: int=15,
+        eos_id=2
+    ) -> T.List[list]:
+        T = idx.size(0)
+        T_new = T + max_token
+        max_seq_length = min(T_new, self.block_size)
+
+        device, dtype = idx.device, idx.dtype
+        empty = torch.empty(T_new, dtype=dtype, device=device)
+        empty[:T] = idx
+        idx = empty
+        input_pos = torch.arange(0, T, device=device)
+
+        # generate max_new_tokens tokens
+        for i in range(max_token):
+            x = idx.index_select(0, input_pos).view(1, -1)
+
+            idx_next = self.model.predict(input=x, max_seq_length=max_seq_length, input_pos=input_pos, temperature=temperature, top_k=top_k)
+
+            if idx_next == eos_id:
+                break
+            
+            input_pos = input_pos[-1:] + 1
+            idx = idx.index_copy(0, input_pos, idx_next)
+
+            if (i+1)%3==0:
+                yield idx[:input_pos]
+
+        self.model.clean_cache()
+        yield idx[:input_pos]
+        yield None

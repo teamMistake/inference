@@ -4,9 +4,10 @@ from pydantic import BaseSettings
 
 
 class ModelSettings(BaseSettings):
-    JAMO_MODEL_PATH = "model_store/model.onnx"
+    MODEL_NAME = "A"
+    JAMO_MODEL_PATH = "model_store/production_A.tar"
     JAMO_MODEL_SIZE = "small"
-
+    BLOCK_SIZE = 256
 
 class MicroBatchSettings(BaseSettings):
     MB_BATCH_SIZE = 64

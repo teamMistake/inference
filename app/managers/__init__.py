@@ -1,1 +1,1 @@
-from .jamo import get_jamo_streamer
+from .jamo import get_jamo_manager
